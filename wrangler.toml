@@ -1,3 +1,7 @@
 name = "trading-card-speed-inventory"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-16"
+
+[[kv_namespaces]]
+binding = "BILLING_KV"
+id = "8578bfa837c54149bfee3b19bb664aa6"
