@@ -73,7 +73,8 @@ const LEGACY_STORAGE_KEY = "trading-card-speed-inventory:v1";
 const SETTINGS_KEY = "trading-card-speed-inventory:settings:v1";
 const BILLING_KEY = "trading-card-speed-inventory:billing:v1";
 const PRO_PRICE_LABEL = "月額480円";
-const STRIPE_PAYMENT_LINK = import.meta.env.VITE_STRIPE_PAYMENT_LINK ?? "";
+const STRIPE_PAYMENT_LINK =
+  import.meta.env.VITE_STRIPE_PAYMENT_LINK ?? "https://buy.stripe.com/8x2aEZeH8dmOdh0e8L9AA00";
 
 const titles: Title[] = ["", "ポケカ", "ワンピ", "DBFW"];
 const rarities: Rarity[] = ["", "SAR", "SR", "UR", "SEC", "L", "AR", "R", "その他"];
