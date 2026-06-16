@@ -2,12 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowRight,
+  BadgeCheck,
   Calculator,
   Check,
   Copy,
+  CreditCard,
   Crown,
   Download,
   FileText,
+  Lock,
   Mail,
   Plus,
   Search,
@@ -25,6 +28,8 @@ type Condition = "美品A" | "微傷B" | "傷ありC";
 type Rarity = "" | "SAR" | "SR" | "UR" | "SEC" | "L" | "AR" | "R" | "その他";
 type PsaRank = "PSA10" | "PSA9" | "PSA8" | "PSA7" | "PSA6以下" | "鑑定中";
 type Sheet = "inventory" | "sold";
+type BillingPlan = "free" | "pro";
+type BillingFeature = "ads" | "search" | "period" | "importExport";
 
 type InventoryRow = {
   id: string;
@@ -58,9 +63,17 @@ type ImportPayload = {
   rows?: unknown[];
 };
 
+type BillingState = {
+  plan: BillingPlan;
+  activatedAt?: string;
+};
+
 const STORAGE_KEY = "trading-card-speed-inventory:v2";
 const LEGACY_STORAGE_KEY = "trading-card-speed-inventory:v1";
 const SETTINGS_KEY = "trading-card-speed-inventory:settings:v1";
+const BILLING_KEY = "trading-card-speed-inventory:billing:v1";
+const PRO_PRICE_LABEL = "月額480円";
+const STRIPE_PAYMENT_LINK = import.meta.env.VITE_STRIPE_PAYMENT_LINK ?? "";
 
 const titles: Title[] = ["", "ポケカ", "ワンピ", "DBFW"];
 const rarities: Rarity[] = ["", "SAR", "SR", "UR", "SEC", "L", "AR", "R", "その他"];
@@ -68,6 +81,13 @@ const conditions: Condition[] = ["美品A", "微傷B", "傷ありC"];
 const psaRanks: PsaRank[] = ["PSA10", "PSA9", "PSA8", "PSA7", "PSA6以下", "鑑定中"];
 
 const yen = new Intl.NumberFormat("ja-JP");
+
+const featureLabels: Record<BillingFeature, string> = {
+  ads: "広告非表示",
+  search: "メルカリ・X検索",
+  period: "期間集計",
+  importExport: "インポート / エクスポート",
+};
 
 const emptyRow = (): InventoryRow => ({
   id: crypto.randomUUID(),
@@ -228,6 +248,19 @@ function loadSettings(): AppSettings {
   }
 }
 
+function loadBilling(): BillingState {
+  try {
+    const saved = localStorage.getItem(BILLING_KEY);
+    if (!saved) return { plan: "free" };
+    const parsed = JSON.parse(saved) as Partial<BillingState>;
+    return parsed.plan === "pro"
+      ? { plan: "pro", activatedAt: typeof parsed.activatedAt === "string" ? parsed.activatedAt : undefined }
+      : { plan: "free" };
+  } catch {
+    return { plan: "free" };
+  }
+}
+
 function inPeriod(date: string, start: string, end: string): boolean {
   if (!date) return false;
   if (start && date < start) return false;
@@ -350,24 +383,27 @@ function PricingPage() {
         <h1>料金</h1>
         <div className="pricing-grid">
           <article>
+            <p className="plan-kicker">Free</p>
             <h2>無料</h2>
             <p>まずは在庫入力と利益計算を試せます。</p>
             <ul>
               <li>在庫入力</li>
               <li>手残り利益計算</li>
+              <li>SNS用テキスト生成</li>
               <li>広告表示</li>
             </ul>
             <a href="/app">無料で使う</a>
           </article>
           <article className="featured-plan">
-            <h2>Pro</h2>
-            <p>運用・分析・バックアップ向けの追加機能を想定しています。</p>
+            <p className="plan-kicker">Pro</p>
+            <h2>{PRO_PRICE_LABEL}</h2>
+            <p>運用・分析・バックアップ向けの追加機能を使える月額プランです。</p>
             <ul>
               <li>広告非表示</li>
               <li>インポート / エクスポート</li>
               <li>検索・期間集計を制限なしで利用</li>
             </ul>
-            <button type="button">準備中</button>
+            <a href="/app">Proを見る</a>
           </article>
         </div>
       </section>
@@ -446,9 +482,11 @@ function NotFoundPage() {
 function InventoryApp() {
   const [rows, setRows] = useState<InventoryRow[]>(loadRows);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [billing, setBilling] = useState<BillingState>(loadBilling);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
-  const [checkoutStatus, setCheckoutStatus] = useState<"idle" | "ready">("idle");
+  const [upgradeReason, setUpgradeReason] = useState<BillingFeature | null>(null);
+  const [checkoutStatus, setCheckoutStatus] = useState<"idle" | "missing">("idle");
   const [bottomSheetOpen, setBottomSheetOpen] = useState(false);
   const [activeSheet, setActiveSheet] = useState<Sheet>("inventory");
   const [salePeriodStart, setSalePeriodStart] = useState("");
@@ -464,6 +502,7 @@ function InventoryApp() {
   const tableScrollerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [tableScrollWidth, setTableScrollWidth] = useState(0);
+  const isPro = billing.plan === "pro";
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
@@ -472,6 +511,25 @@ function InventoryApp() {
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem(BILLING_KEY, JSON.stringify(billing));
+  }, [billing]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const billingResult = params.get("billing");
+    if (billingResult !== "success" && billingResult !== "free") return;
+    setBilling(
+      billingResult === "success"
+        ? { plan: "pro", activatedAt: new Date().toISOString() }
+        : { plan: "free" },
+    );
+    setUpgradeOpen(false);
+    params.delete("billing");
+    const nextQuery = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}`);
+  }, []);
 
   useEffect(() => {
     if (!pendingFocusId.current) return;
@@ -485,6 +543,25 @@ function InventoryApp() {
     if (!top || !table) return;
     if (source === "top") table.scrollLeft = top.scrollLeft;
     else top.scrollLeft = table.scrollLeft;
+  };
+
+  const openUpgrade = (feature: BillingFeature | null = null) => {
+    setUpgradeReason(feature);
+    setCheckoutStatus("idle");
+    setUpgradeOpen(true);
+  };
+
+  const requirePro = (feature: BillingFeature) => {
+    openUpgrade(feature);
+  };
+
+  const startCheckout = () => {
+    if (isPro) return;
+    if (!STRIPE_PAYMENT_LINK) {
+      setCheckoutStatus("missing");
+      return;
+    }
+    window.location.href = STRIPE_PAYMENT_LINK;
   };
 
   const inventoryRows = useMemo(() => rows.filter((row) => !row.saleDate), [rows]);
@@ -694,14 +771,14 @@ function InventoryApp() {
           </div>
           <div className="header-actions">
             <button
-              className="pro-button"
+              className={`pro-button ${isPro ? "is-active" : ""}`}
               type="button"
-              onClick={() => setUpgradeOpen(true)}
+              onClick={() => openUpgrade()}
               title="月額プラン"
               aria-label="月額プラン"
             >
-              <Crown size={16} />
-              Pro
+              {isPro ? <BadgeCheck size={16} /> : <Crown size={16} />}
+              {isPro ? "Pro利用中" : "Pro"}
             </button>
             <button
               className="icon-button"
@@ -767,15 +844,17 @@ function InventoryApp() {
             <span>{yen.format(tabCounts.sold)}</span>
           </button>
         </nav>
-        <aside className="ad-banner" aria-label="広告枠">
-          <div>
-            <span>広告枠</span>
-            <strong>カードショップ・買取店向け掲載スペース</strong>
-          </div>
-          <button type="button" onClick={() => setUpgradeOpen(true)}>
-            広告を消す
-          </button>
-        </aside>
+        {!isPro && (
+          <aside className="ad-banner" aria-label="広告枠">
+            <div>
+              <span>広告枠</span>
+              <strong>広告表示エリア</strong>
+            </div>
+            <button type="button" onClick={() => requirePro("ads")}>
+              広告を消す
+            </button>
+          </aside>
+        )}
         <div
           className="top-scrollbar"
           ref={topScrollerRef}
@@ -1010,25 +1089,25 @@ function InventoryApp() {
                     <td>
                       <div className="flex items-center justify-center gap-1">
                         <button
-                          className="action-button"
+                          className={`action-button ${!isPro && hasSearch ? "is-locked" : ""}`}
                           type="button"
-                          onClick={() => openMercari(row)}
+                          onClick={() => (isPro ? openMercari(row) : requirePro("search"))}
                           disabled={!hasSearch}
                           aria-label="メルカリ検索"
-                          title="メルカリ検索"
+                          title={isPro ? "メルカリ検索" : "Proでメルカリ検索"}
                         >
-                          <Search size={14} />
+                          {isPro ? <Search size={14} /> : <Lock size={13} />}
                           <span>M</span>
                         </button>
                         <button
-                          className="action-button"
+                          className={`action-button ${!isPro && hasSearch ? "is-locked" : ""}`}
                           type="button"
-                          onClick={() => openX(row)}
+                          onClick={() => (isPro ? openX(row) : requirePro("search"))}
                           disabled={!hasSearch}
                           aria-label="X検索"
-                          title="X検索"
+                          title={isPro ? "X検索" : "ProでX検索"}
                         >
-                          <XIcon size={14} />
+                          {isPro ? <XIcon size={14} /> : <Lock size={13} />}
                         </button>
                         <button
                           className="danger-button"
@@ -1086,7 +1165,7 @@ function InventoryApp() {
             </div>
           </div>
 
-          <section className="period-grid">
+          <section className={`period-grid ${isPro ? "" : "is-locked"}`}>
             <div className="period-panel">
               <div className="period-title">売却期間</div>
               <div className="period-fields">
@@ -1096,6 +1175,7 @@ function InventoryApp() {
                     className="compact-input"
                     type="date"
                     value={salePeriodStart}
+                    disabled={!isPro}
                     onChange={(event) => setSalePeriodStart(event.target.value)}
                   />
                 </label>
@@ -1105,6 +1185,7 @@ function InventoryApp() {
                     className="compact-input"
                     type="date"
                     value={salePeriodEnd}
+                    disabled={!isPro}
                     onChange={(event) => setSalePeriodEnd(event.target.value)}
                   />
                 </label>
@@ -1126,6 +1207,7 @@ function InventoryApp() {
                     className="compact-input"
                     type="date"
                     value={purchasePeriodStart}
+                    disabled={!isPro}
                     onChange={(event) => setPurchasePeriodStart(event.target.value)}
                   />
                 </label>
@@ -1135,6 +1217,7 @@ function InventoryApp() {
                     className="compact-input"
                     type="date"
                     value={purchasePeriodEnd}
+                    disabled={!isPro}
                     onChange={(event) => setPurchasePeriodEnd(event.target.value)}
                   />
                 </label>
@@ -1144,6 +1227,12 @@ function InventoryApp() {
                 <strong>{yen.format(purchasePeriodTotals.purchase)}円</strong>
               </div>
             </div>
+            {!isPro && (
+              <button className="period-lock" type="button" onClick={() => requirePro("period")}>
+                <Lock size={15} />
+                期間集計はProで利用
+              </button>
+            )}
           </section>
 
           <div className="footer-actions">
@@ -1172,17 +1261,23 @@ function InventoryApp() {
                   ? "選択なし"
                   : "コピペ用テキスト生成"}
             </button>
-            <button className="icon-action-button" type="button" onClick={exportData} title="エクスポート" aria-label="エクスポート">
-              <Download size={18} />
+            <button
+              className={`icon-action-button ${isPro ? "" : "is-locked"}`}
+              type="button"
+              onClick={() => (isPro ? exportData() : requirePro("importExport"))}
+              title={isPro ? "エクスポート" : "Proでエクスポート"}
+              aria-label={isPro ? "エクスポート" : "Proでエクスポート"}
+            >
+              {isPro ? <Download size={18} /> : <Lock size={16} />}
             </button>
             <button
-              className={`icon-action-button ${importStatus === "error" ? "is-error" : ""}`}
+              className={`icon-action-button ${importStatus === "error" ? "is-error" : ""} ${isPro ? "" : "is-locked"}`}
               type="button"
-              onClick={() => fileInputRef.current?.click()}
-              title="インポート"
-              aria-label="インポート"
+              onClick={() => (isPro ? fileInputRef.current?.click() : requirePro("importExport"))}
+              title={isPro ? "インポート" : "Proでインポート"}
+              aria-label={isPro ? "インポート" : "Proでインポート"}
             >
-              <Upload size={18} />
+              {isPro ? <Upload size={18} /> : <Lock size={16} />}
             </button>
             <input
               ref={fileInputRef}
@@ -1214,7 +1309,7 @@ function InventoryApp() {
           <section className="upgrade-modal">
             <div className="upgrade-modal-header">
               <div>
-                <p>月額プラン</p>
+                <p>{isPro ? "現在のプラン" : "月額プラン"}</p>
                 <h2 id="upgrade-title">爆速トレカ在庫管理 Pro</h2>
               </div>
               <button
@@ -1227,9 +1322,15 @@ function InventoryApp() {
                 <XIcon size={18} />
               </button>
             </div>
+            {upgradeReason && !isPro && (
+              <div className="upgrade-reason">
+                <Lock size={15} />
+                {featureLabels[upgradeReason]}はPro機能です
+              </div>
+            )}
             <div className="upgrade-price">
-              <strong>月額プラン</strong>
-              <span>広告非表示 / 高速入力向け追加機能</span>
+              <strong>{isPro ? "Pro利用中" : PRO_PRICE_LABEL}</strong>
+              <span>広告非表示 / 検索 / 期間集計 / バックアップ機能</span>
             </div>
             <ul className="upgrade-list">
               <li>広告枠を非表示</li>
@@ -1237,14 +1338,32 @@ function InventoryApp() {
               <li>検索・期間集計を制限なしで利用</li>
             </ul>
             <button
-              className="upgrade-cta"
+              className={`upgrade-cta ${isPro ? "is-complete" : ""}`}
               type="button"
-              onClick={() => setCheckoutStatus("ready")}
+              onClick={startCheckout}
+              disabled={isPro}
             >
-              月額プランへ進む
+              {isPro ? (
+                <>
+                  <BadgeCheck size={17} />
+                  Proが有効です
+                </>
+              ) : (
+                <>
+                  <CreditCard size={17} />
+                  {PRO_PRICE_LABEL}で開始
+                </>
+              )}
             </button>
-            {checkoutStatus === "ready" && (
-              <p className="upgrade-note">決済連携を追加すると、このボタンからStripeなどの決済ページへ遷移します。</p>
+            {checkoutStatus === "missing" && (
+              <p className="upgrade-note is-warning">
+                決済リンクが未設定です。Stripe Payment Linkを作成し、VITE_STRIPE_PAYMENT_LINKに設定してください。
+              </p>
+            )}
+            {!isPro && (
+              <p className="upgrade-note">
+                決済成功URLは /app?billing=success、キャンセルURLは /app?billing=free に設定してください。現在はLocalStorageでPro状態を保持します。
+              </p>
             )}
           </section>
         </div>
