@@ -66,12 +66,14 @@ type ImportPayload = {
 type BillingState = {
   plan: BillingPlan;
   activatedAt?: string;
+  checkedAt?: string;
 };
 
 const STORAGE_KEY = "trading-card-speed-inventory:v2";
 const LEGACY_STORAGE_KEY = "trading-card-speed-inventory:v1";
 const SETTINGS_KEY = "trading-card-speed-inventory:settings:v1";
 const BILLING_KEY = "trading-card-speed-inventory:billing:v1";
+const BILLING_CLIENT_KEY = "trading-card-speed-inventory:billing-client:v1";
 const PRO_PRICE_LABEL = "月額480円";
 const STRIPE_PAYMENT_LINK =
   import.meta.env.VITE_STRIPE_PAYMENT_LINK ?? "https://buy.stripe.com/8x2aEZeH8dmOdh0e8L9AA00";
@@ -250,16 +252,15 @@ function loadSettings(): AppSettings {
 }
 
 function loadBilling(): BillingState {
-  try {
-    const saved = localStorage.getItem(BILLING_KEY);
-    if (!saved) return { plan: "free" };
-    const parsed = JSON.parse(saved) as Partial<BillingState>;
-    return parsed.plan === "pro"
-      ? { plan: "pro", activatedAt: typeof parsed.activatedAt === "string" ? parsed.activatedAt : undefined }
-      : { plan: "free" };
-  } catch {
-    return { plan: "free" };
-  }
+  return { plan: "free" };
+}
+
+function getBillingClientReference(): string {
+  const saved = localStorage.getItem(BILLING_CLIENT_KEY);
+  if (saved && /^[0-9a-f-]{36}$/i.test(saved)) return saved;
+  const next = crypto.randomUUID();
+  localStorage.setItem(BILLING_CLIENT_KEY, next);
+  return next;
 }
 
 function inPeriod(date: string, start: string, end: string): boolean {
@@ -422,7 +423,7 @@ function PrivacyPage() {
         <p>本サービスは、トレーディングカードの在庫管理を支援するWebアプリです。</p>
         <h2>保存される情報</h2>
         <p>
-          在庫データ、設定、Pro状態などは利用者のブラウザ内のLocalStorageに保存されます。現時点ではサーバーに在庫データを送信しません。
+          在庫データ、設定、決済確認用のランダムIDなどは利用者のブラウザ内のLocalStorageに保存されます。現時点ではサーバーに在庫データを送信しません。
           ブラウザのデータ削除、端末変更、シークレットモードの利用などにより保存データが失われる場合があります。
         </p>
         <h2>広告について</h2>
@@ -524,6 +525,7 @@ function InventoryApp() {
   const tableScrollerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [tableScrollWidth, setTableScrollWidth] = useState(0);
+  const billingClientReference = useMemo(getBillingClientReference, []);
   const isPro = billing.plan === "pro";
 
   useEffect(() => {
@@ -535,23 +537,47 @@ function InventoryApp() {
   }, [settings]);
 
   useEffect(() => {
-    localStorage.setItem(BILLING_KEY, JSON.stringify(billing));
-  }, [billing]);
-
-  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const billingResult = params.get("billing");
-    if (billingResult !== "success" && billingResult !== "free") return;
-    setBilling(
-      billingResult === "success"
-        ? { plan: "pro", activatedAt: new Date().toISOString() }
-        : { plan: "free" },
-    );
-    setUpgradeOpen(false);
+    if (!params.has("billing") && !params.has("checkout")) return;
     params.delete("billing");
+    params.delete("checkout");
     const nextQuery = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}`);
   }, []);
+
+  useEffect(() => {
+    localStorage.removeItem(BILLING_KEY);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshBilling = async () => {
+      try {
+        const response = await fetch(
+          `/api/billing-status?client_reference_id=${encodeURIComponent(billingClientReference)}`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (!response.ok) throw new Error("Billing status unavailable");
+        const result = (await response.json()) as Partial<BillingState>;
+        if (cancelled) return;
+        setBilling({
+          plan: result.plan === "pro" ? "pro" : "free",
+          activatedAt: typeof result.activatedAt === "string" ? result.activatedAt : undefined,
+          checkedAt: new Date().toISOString(),
+        });
+      } catch {
+        if (!cancelled) setBilling((current) => ({ ...current, checkedAt: new Date().toISOString() }));
+      }
+    };
+
+    void refreshBilling();
+    const intervalId = window.setInterval(refreshBilling, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [billingClientReference]);
 
   useEffect(() => {
     if (!pendingFocusId.current) return;
@@ -583,7 +609,9 @@ function InventoryApp() {
       setCheckoutStatus("missing");
       return;
     }
-    window.location.href = STRIPE_PAYMENT_LINK;
+    const checkoutUrl = new URL(STRIPE_PAYMENT_LINK);
+    checkoutUrl.searchParams.set("client_reference_id", billingClientReference);
+    window.location.href = checkoutUrl.toString();
   };
 
   const inventoryRows = useMemo(() => rows.filter((row) => !row.saleDate), [rows]);
@@ -1384,7 +1412,7 @@ function InventoryApp() {
             )}
             {!isPro && (
               <p className="upgrade-note">
-                決済成功URLは /app?billing=success、キャンセルURLは /app?billing=free に設定してください。現在はLocalStorageでPro状態を保持します。
+                決済後、Stripe Webhookで支払い確認が取れた場合のみProが有効になります。URLだけではPro機能は開放されません。
               </p>
             )}
           </section>
